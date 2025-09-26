@@ -109,7 +109,7 @@ class SettingsView(discord.ui.View):
 
 @bot.tree.command(name="설정", description="음성 채널과 로그 채널 설정을 위한 패널을 엽니다.")
 @app_commands.checks.has_permissions(administrator=True) # 관리자만 이 명령어를 사용할 수 있습니다.
-async def set_command(interaction: discord.Interaction):
+async def set_command(interaction: discord.Interaction):    
     """'/설정' 명령어를 실행하면 현재 설정값을 보여주는 임베드와 설정용 UI를 보냅니다."""
     config = load_config().get(str(interaction.guild.id), {})
     voice_channel_id = config.get("voice_channel_id")
