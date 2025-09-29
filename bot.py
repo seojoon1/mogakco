@@ -20,6 +20,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 CONFIG_FILE = "config.json"
 
+# 사용자의 음성 채널 접속 시간을 기록하는 딕셔너리
+voice_connections = {}
+
 # -------------------- 설정 관리 함수 --------------------
 
 def load_config():
@@ -266,18 +269,15 @@ async def reset_warnings(interaction: discord.Interaction, member: discord.Membe
     user_id = str(member.id)
     config = load_config()
 
-    # 서버 설정이나 경고 기록이 있는지 확인
     if guild_id not in config or 'warning_counts' not in config[guild_id] or user_id not in config[guild_id]['warning_counts']:
         await interaction.response.send_message(f"✅ **{member.display_name}** 님은 초기화할 경고 기록이 없습니다.", ephemeral=True)
         return
 
-    # 사용자의 경고 횟수 삭제
     del config[guild_id]['warning_counts'][user_id]
     save_config(config)
 
     await interaction.response.send_message(f"✅ **{member.display_name}** 님의 경고 횟수를 성공적으로 초기화했습니다.", ephemeral=True)
 
-    # 로그 채널에 알림 (선택 사항)
     log_channel_id = config[guild_id].get("text_channel_id")
     if log_channel_id:
         log_channel = bot.get_channel(log_channel_id)
@@ -310,6 +310,66 @@ async def punishment_settings(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, view=PunishmentSettingsView(), ephemeral=True)
 
+# -------------------- ✨ [수정된 기능] 음성 채널 체류 시간 랭킹 --------------------
+def format_duration(seconds):
+    """초를 '시, 분, 초' 형태로 변환하는 함수 (소수점 둘째 자리까지)"""
+    if seconds < 60:
+        # 60초 미만일 경우, 소수점 둘째 자리까지 표시
+        return f"{seconds:.2f}초"
+    
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    
+    if hours > 0:
+        # 시간, 분은 정수로, 초는 소수점 둘째 자리까지 표시
+        return f"{int(hours)}시간 {int(minutes)}분 {seconds:.2f}초"
+    else:
+        # 분은 정수로, 초는 소수점 둘째 자리까지 표시
+        return f"{int(minutes)}분 {seconds:.2f}초"
+
+
+@bot.tree.command(name="랭킹", description="음성 채널 체류 시간 랭킹을 표시합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def show_ranking(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+    config = load_config()
+    
+    voice_time_data = config.get(guild_id, {}).get("voice_time_tracking", {})
+
+    if not voice_time_data:
+        await interaction.response.send_message("아직 음성 채널 체류 시간 기록이 없습니다.", ephemeral=True)
+        return
+
+    sorted_users = sorted(voice_time_data.items(), key=lambda item: item[1], reverse=True)
+
+    embed = discord.Embed(title="🏆 음성 채널 활동 랭킹", color=discord.Color.gold())
+    
+    medals = ["🥇", "🥈", "🥉"]
+    rank_description = []
+    
+    for i, (user_id, total_seconds) in enumerate(sorted_users[:10]):
+        try:
+            member = await interaction.guild.fetch_member(int(user_id))
+            user_display_name = member.display_name
+        except discord.NotFound:
+            user_display_name = f"알 수 없는 유저 (ID: {user_id})"
+        except Exception as e:
+            user_display_name = f"유저 정보 로드 실패"
+
+        formatted_time = format_duration(total_seconds)
+        if i < len(medals):
+            # 1, 2, 3위는 메달과 함께 순위 표시
+            rank_entry = f"{medals[i]} **{i+1}위.** {user_display_name} - `{formatted_time}`"
+        else:
+            # 4위부터는 순위 번호만 표시
+            rank_entry = f"**{i+1}위.** {user_display_name} - `{formatted_time}`"
+            
+        rank_description.append(rank_entry)
+
+    embed.description = "\n".join(rank_description)
+    
+    await interaction.response.send_message(embed=embed)
+
 
 # -------------------- 봇 이벤트 핸들러 --------------------
 @bot.event
@@ -325,23 +385,48 @@ async def on_ready():
 async def on_voice_state_update(member, before, after):
     config = load_config()
     server_id = str(member.guild.id)
-    server_config = config.get(server_id, {})
+    
+    if server_id not in config:
+        config[server_id] = {}
+        
+    server_config = config[server_id]
     target_voice_channel_id = server_config.get("voice_channel_id")
     log_text_channel_id = server_config.get("text_channel_id")
-    if not target_voice_channel_id or not log_text_channel_id: return
-    log_channel = bot.get_channel(log_text_channel_id)
-    if not log_channel: return
-    
+
+    if not target_voice_channel_id:
+        return
+
+    log_channel = bot.get_channel(log_text_channel_id) if log_text_channel_id else None
+
     is_join = not before.channel and after.channel and after.channel.id == target_voice_channel_id
     is_leave = before.channel and not after.channel and before.channel.id == target_voice_channel_id
-    
-    if is_join:
-        embed = discord.Embed(title="🎙️ 음성 채널 입장", description=f"**{member.display_name}** 님이 입장했습니다.", color=discord.Color.green())
-        await log_channel.send(embed=embed)
-    elif is_leave:
-        embed = discord.Embed(title="🚫 음성 채널 퇴장", description=f"**{member.display_name}** 님이 퇴장했습니다.", color=discord.Color.red())
-        await log_channel.send(embed=embed)
 
+    if is_join:
+        voice_connections[member.id] = datetime.datetime.now()
+        if log_channel:
+            embed = discord.Embed(title="🎙️ 음성 채널 입장", description=f"**{member.display_name}** 님이 입장했습니다.", color=discord.Color.green())
+            await log_channel.send(embed=embed)
+    
+    elif is_leave:
+        if member.id in voice_connections:
+            join_time = voice_connections.pop(member.id)
+            duration = datetime.datetime.now() - join_time
+            duration_seconds = duration.total_seconds()
+            
+            user_id = str(member.id)
+            if 'voice_time_tracking' not in server_config:
+                server_config['voice_time_tracking'] = {}
+            
+            current_total_time = server_config['voice_time_tracking'].get(user_id, 0)
+            server_config['voice_time_tracking'][user_id] = current_total_time + duration_seconds
+            
+            save_config(config)
+
+            if log_channel:
+                formatted_duration = format_duration(duration_seconds)
+                embed = discord.Embed(title="🚫 음성 채널 퇴장", description=f"**{member.display_name}** 님이 퇴장했습니다.", color=discord.Color.red())
+                embed.add_field(name="체류 시간", value=formatted_duration, inline=False)
+                await log_channel.send(embed=embed)
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -351,11 +436,9 @@ async def on_message(message: discord.Message):
     config = load_config()
     guild_id = str(message.guild.id)
 
-    # BUG FIX: guild_id가 config에 없을 경우를 대비하여 미리 생성
     if guild_id not in config:
         config[guild_id] = {}
     
-    # 이제 config[guild_id]가 항상 존재함을 보장할 수 있음
     server_config = config[guild_id]
     
     keywords = server_config.get("censored_keywords", [])
@@ -367,7 +450,6 @@ async def on_message(message: discord.Message):
             log_channel_id = server_config.get("text_channel_id")
             log_channel = bot.get_channel(log_channel_id) if log_channel_id else None
 
-            # 1. 메시지 삭제
             try:
                 await message.delete()
             except discord.Forbidden:
@@ -376,7 +458,6 @@ async def on_message(message: discord.Message):
             except discord.NotFound:
                 return
 
-            # 2. 검열 로그 전송
             if log_channel:
                 embed = discord.Embed(title="🚫 메시지 검열됨", color=discord.Color.gold(), timestamp=datetime.datetime.now())
                 embed.description=f"**작성자:** {message.author.mention}\n**채널:** {message.channel.mention}"
@@ -384,7 +465,6 @@ async def on_message(message: discord.Message):
                 embed.add_field(name="감지된 키워드", value=f"`{keyword}`", inline=False)
                 await log_channel.send(embed=embed)
 
-            # 3. 처벌 로직 실행
             punishment_config = server_config.get("punishment", {})
             punishment_type = punishment_config.get("type", "none")
             threshold = punishment_config.get("threshold", 0)
@@ -392,20 +472,18 @@ async def on_message(message: discord.Message):
             if punishment_type != "none" and threshold > 0:
                 user_id = str(message.author.id)
                 
-                # 경고 횟수 업데이트
                 if 'warning_counts' not in server_config:
                     server_config['warning_counts'] = {}
                 
                 current_warnings = server_config['warning_counts'].get(user_id, 0) + 1
                 server_config['warning_counts'][user_id] = current_warnings
                 
-                # 처벌 실행 또는 경고
                 if current_warnings >= threshold:
-                    server_config['warning_counts'][user_id] = 0  # 경고 횟수 초기화
+                    server_config['warning_counts'][user_id] = 0
                     reason = f"검열 규칙 위반 (경고 {threshold}회 누적)"
                     
                     try:
-                        action_log = "" # action_log 변수 초기화
+                        action_log = ""
                         if punishment_type == "timeout":
                             duration_minutes = punishment_config.get("timeout_duration_minutes", 10)
                             duration = datetime.timedelta(minutes=duration_minutes)
@@ -429,17 +507,14 @@ async def on_message(message: discord.Message):
                          if log_channel: await log_channel.send(f"⚠️ **권한 오류:** {message.author.mention}님에게 처벌을 실행할 수 없습니다. 봇의 역할 순위나 권한을 확인해주세요.")
 
                 else:
-                    # 사용자에게 DM으로 경고
                     try:
                         await message.author.send(f"**[ {message.guild.name} ]** 서버에서 검열 키워드 사용이 감지되었습니다.\n> 현재 경고 횟수: **{current_warnings}/{threshold}**\n> 횟수 초과 시 처벌이 적용될 수 있습니다.")
                     except discord.Forbidden:
-                        # DM을 보낼 수 없는 경우, 로그 채널에 알림
                         if log_channel: await log_channel.send(f"ℹ️ {message.author.mention}님에게 DM을 보낼 수 없어 경고를 전달하지 못했습니다.")
                 
-                # 변경된 경고 횟수 저장
                 save_config(config)
             
-            break # 키워드 하나만 검사하고 중단
+            break
 
 # -------------------- 봇 실행 --------------------
 if BOT_TOKEN:
