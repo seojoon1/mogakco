@@ -35,13 +35,13 @@ pip install -r requirements.txt
 **3. `.env` 파일 생성**
 프로젝트 폴더 최상단에 `.env` 파일을 만들고, 아래 내용과 같이 봇 토큰을 입력합니다. **이 파일은 절대로 깃허브에 올리면 안 됩니다!**
 ```
-BOT_TOKEN="여기에_디스코드_개발자포털에서_받은_봇_토큰을_입력하세요"
+API_KEY="여기에_디스코드_개발자포털에서_받은_봇_토큰을_입력하세요"
 ```
 
 **4. 봇 초대하기**
 [Discord 개발자 포털](https://discord.com/developers/applications)에서 봇을 서버에 초대합니다.
 -   **Scopes**: `bot`, `application.commands`
--   **필요 권한**: `Send Messages`, `Read Message History` 등 봇 기능에 필요한 권한
+-   **필요 권한**: `Manage Channels`, `Manage Messages`, `Moderate Members`, `Kick Members`, `Ban Members`, `Send Messages`, `Read Message History` 등 봇 기능에 필요한 권한
 
 ---
 
