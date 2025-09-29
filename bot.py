@@ -258,6 +258,37 @@ async def list_keywords(interaction: discord.Interaction):
     embed = discord.Embed(title="🚫 검열 키워드 목록", description="\n".join(f"- {word}" for word in keywords), color=discord.Color.orange())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.tree.command(name="경고초기화", description="특정 사용자의 누적된 경고 횟수를 0으로 초기화합니다.")
+@app_commands.describe(member="경고를 초기화할 서버 멤버를 선택하세요.")
+@app_commands.checks.has_permissions(administrator=True)
+async def reset_warnings(interaction: discord.Interaction, member: discord.Member):
+    guild_id = str(interaction.guild.id)
+    user_id = str(member.id)
+    config = load_config()
+
+    # 서버 설정이나 경고 기록이 있는지 확인
+    if guild_id not in config or 'warning_counts' not in config[guild_id] or user_id not in config[guild_id]['warning_counts']:
+        await interaction.response.send_message(f"✅ **{member.display_name}** 님은 초기화할 경고 기록이 없습니다.", ephemeral=True)
+        return
+
+    # 사용자의 경고 횟수 삭제
+    del config[guild_id]['warning_counts'][user_id]
+    save_config(config)
+
+    await interaction.response.send_message(f"✅ **{member.display_name}** 님의 경고 횟수를 성공적으로 초기화했습니다.", ephemeral=True)
+
+    # 로그 채널에 알림 (선택 사항)
+    log_channel_id = config[guild_id].get("text_channel_id")
+    if log_channel_id:
+        log_channel = bot.get_channel(log_channel_id)
+        if log_channel:
+            embed = discord.Embed(
+                title="ℹ️ 경고 초기화",
+                description=f"관리자 **{interaction.user.display_name}** 님이 **{member.mention}** 님의 경고를 초기화했습니다.",
+                color=discord.Color.light_grey()
+            )
+            await log_channel.send(embed=embed)
+
 @bot.tree.command(name="처벌설정", description="검열 적발 시 자동 처벌 규칙을 설정합니다.")
 @app_commands.checks.has_permissions(administrator=True)
 async def punishment_settings(interaction: discord.Interaction):
