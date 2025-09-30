@@ -204,6 +204,102 @@ class PunishmentSettingsView(discord.ui.View):
         else:
             await interaction.response.send_modal(PunishmentConfigModal(punishment_type))
 
+class WelcomeMessageModal(discord.ui.Modal, title="환영 메시지 편집"):
+    """환영 메시지 내용을 편집하는 모달"""
+    def __init__(self, current_message: str):
+        super().__init__()
+        self.message_input = discord.ui.TextInput(
+            label="환영 메시지 (변수 사용 가능)",
+            style=discord.TextStyle.paragraph,
+            placeholder="예: {user_mention}님, {server_name}에 오신 것을 환영합니다!",
+            default=current_message,
+            max_length=1000
+        )
+        self.add_item(self.message_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild_id = str(interaction.guild.id)
+        async with config_lock:
+            config = load_config()
+            if guild_id not in config: config[guild_id] = {}
+            if 'welcome_message' not in config[guild_id]: config[guild_id]['welcome_message'] = {}
+            
+            config[guild_id]['welcome_message']['message'] = self.message_input.value
+            save_config(config)
+        
+        await interaction.response.send_message("✅ 환영 메시지가 성공적으로 저장되었습니다.", ephemeral=True)
+
+
+class WelcomeSettingsView(discord.ui.View):
+    """입장 환영 메시지 설정을 위한 UI 뷰"""
+    def __init__(self, interaction: discord.Interaction):
+        super().__init__(timeout=180)
+        self.guild_id = str(interaction.guild.id)
+
+    @discord.ui.select(
+        placeholder="환영 메시지 기능을 켜거나 끕니다.",
+        options=[
+            discord.SelectOption(label="켜기", value="true", description="새로운 멤버 입장 시 환영 메시지를 보냅니다."),
+            discord.SelectOption(label="끄기", value="false", description="환영 메시지를 보내지 않습니다."),
+        ],
+        row=0
+    )
+    async def toggle_welcome(self, interaction: discord.Interaction, select: discord.ui.Select):
+        enabled = select.values[0] == "true"
+        async with config_lock:
+            config = load_config()
+            if self.guild_id not in config: config[self.guild_id] = {}
+            if 'welcome_message' not in config[self.guild_id]: config[self.guild_id]['welcome_message'] = {}
+
+            config[self.guild_id]['welcome_message']['enabled'] = enabled
+            save_config(config)
+
+        await self.update_and_respond(interaction, f"환영 메시지 기능이 {'✅ 켜졌습니다' if enabled else '❌ 꺼졌습니다'}.")
+
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
+        channel_types=[discord.ChannelType.text],
+        placeholder="환영 메시지를 보낼 채널을 선택하세요.",
+        row=1
+    )
+    async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        channel = select.values[0]
+        async with config_lock:
+            config = load_config()
+            if self.guild_id not in config: config[self.guild_id] = {}
+            if 'welcome_message' not in config[self.guild_id]: config[self.guild_id]['welcome_message'] = {}
+
+            config[self.guild_id]['welcome_message']['channel_id'] = channel.id
+            save_config(config)
+
+        await self.update_and_respond(interaction, f"환영 메시지 채널이 {channel.mention}(으)로 설정되었습니다.")
+
+    @discord.ui.button(label="환영 메시지 편집", style=discord.ButtonStyle.primary, row=2)
+    async def edit_message_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        config = load_config().get(self.guild_id, {})
+        current_message = config.get('welcome_message', {}).get('message', "")
+        await interaction.response.send_modal(WelcomeMessageModal(current_message))
+    
+    async def update_and_respond(self, interaction: discord.Interaction, status: str):
+        # 응답 후 embed를 업데이트하기 위한 헬퍼 함수
+        await interaction.response.defer(ephemeral=True)
+        config = load_config().get(self.guild_id, {})
+        welcome_config = config.get('welcome_message', {})
+
+        is_enabled = welcome_config.get('enabled', False)
+        channel_id = welcome_config.get('channel_id')
+        channel = interaction.guild.get_channel(channel_id) if channel_id else None
+        message = welcome_config.get('message', '미설정')
+
+        embed = discord.Embed(title="👋 입장 환영 메시지 설정", description=status, color=discord.Color.green())
+        embed.add_field(name="기능 상태", value="**🟢 켜짐**" if is_enabled else "⚫ 꺼짐", inline=True)
+        embed.add_field(name="설정된 채널", value=channel.mention if channel else "미설정", inline=True)
+        embed.add_field(name="설정된 메시지", value=f"```{message}```", inline=False)
+        embed.set_footer(text="메시지에는 변수를 사용할 수 있습니다. (예: {user_mention})")
+        
+        await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
+
+
 # -------------------- 슬래시 명령어 --------------------
 
 @bot.tree.command(name="초기설정", description="봇 운영에 필요한 비공개 로그 채널을 생성하고 설정합니다.")
@@ -243,6 +339,26 @@ async def set_command(interaction: discord.Interaction):
     embed.add_field(name="감시 중인 음성 채널", value=vc.mention if vc else "미설정", inline=False)
     embed.add_field(name="로그가 기록될 텍스트 채널", value=tc.mention if tc else "미설정", inline=False)
     await interaction.response.send_message(embed=embed, view=SettingsView(interaction), ephemeral=True)
+
+@bot.tree.command(name="입장", description="새로운 멤버를 위한 환영 메시지를 설정합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def welcome_settings(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+    config = load_config().get(guild_id, {})
+    welcome_config = config.get('welcome_message', {})
+
+    is_enabled = welcome_config.get('enabled', False)
+    channel_id = welcome_config.get('channel_id')
+    channel = interaction.guild.get_channel(channel_id) if channel_id else None
+    message = welcome_config.get('message', '미설정')
+
+    embed = discord.Embed(title="👋 입장 환영 메시지 설정", description="아래 메뉴를 통해 환영 메시지 기능을 설정하세요.", color=discord.Color.green())
+    embed.add_field(name="기능 상태", value="**🟢 켜짐**" if is_enabled else "⚫ 꺼짐", inline=True)
+    embed.add_field(name="설정된 채널", value=channel.mention if channel else "미설정", inline=True)
+    embed.add_field(name="설정된 메시지", value=f"```{message}```", inline=False)
+    embed.set_footer(text="메시지에는 변수를 사용할 수 있습니다. (예: {user_mention})")
+
+    await interaction.response.send_message(embed=embed, view=WelcomeSettingsView(interaction), ephemeral=True)
 
 @bot.tree.command(name="검열추가", description="검열할 키워드를 추가합니다.")
 @app_commands.checks.has_permissions(administrator=True)
@@ -363,7 +479,8 @@ async def help_command(interaction: discord.Interaction):
     admin_commands = (
         "**[ 채널 설정 ]**\n"
         "`/초기설정` : 봇 운영에 필요한 비공개 로그 채널을 생성합니다.\n"
-        "`/설정` : 음성 채널 및 로그 채널을 설정하는 패널을 엽니다.\n\n"
+        "`/설정` : 음성 채널 및 로그 채널을 설정하는 패널을 엽니다.\n"
+        "`/입장` : 새로운 멤버를 위한 환영 메시지를 설정합니다.\n\n"
         "**[ 검열 및 처벌 ]**\n"
         "`/검열추가` : 검열할 키워드를 추가합니다.\n"
         "`/검열삭제` : 등록된 검열 키워드를 삭제합니다.\n"
@@ -399,6 +516,40 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.response.send_message("🐛 명령어 실행 중 알 수 없는 오류가 발생했습니다.", ephemeral=True)
         else:
             await interaction.followup.send("🐛 명령어 실행 중 알 수 없는 오류가 발생했습니다.", ephemeral=True)
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    guild_id = str(member.guild.id)
+    config = load_config().get(guild_id, {})
+    welcome_config = config.get('welcome_message', {})
+
+    if not welcome_config.get('enabled', False):
+        return
+
+    channel_id = welcome_config.get('channel_id')
+    message_template = welcome_config.get('message')
+
+    if not channel_id or not message_template:
+        return
+
+    channel = member.guild.get_channel(channel_id)
+    if not channel:
+        return
+
+    # 변수들을 실제 값으로 치환
+    formatted_message = message_template.format(
+        user=member,
+        server=member.guild,
+        user_mention=member.mention,
+        user_name=member.display_name,
+        server_name=member.guild.name,
+        member_count=member.guild.member_count
+    )
+
+    try:
+        await channel.send(formatted_message)
+    except discord.Forbidden:
+        print(f"오류: '{member.guild.name}' 서버의 '{channel.name}' 채널에 메시지를 보낼 권한이 없습니다.")
 
 
 @bot.event
