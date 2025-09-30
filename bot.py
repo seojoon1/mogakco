@@ -5,6 +5,7 @@ import os
 import json
 from dotenv import load_dotenv
 import datetime
+import asyncio
 
 # -------------------- 초기 설정 --------------------
 
@@ -19,6 +20,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 CONFIG_FILE = "config.json"
+config_lock = asyncio.Lock() # 설정 파일 동시 접근을 막기 위한 Lock
 
 # 사용자의 음성 채널 접속 시간을 기록하는 딕셔너리
 voice_connections = {}
@@ -55,11 +57,12 @@ class SettingsView(discord.ui.View):
     )
     async def voice_channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         selected_channel = select.values[0]
-        config = load_config()
-        if self.guild_id not in config:
-            config[self.guild_id] = {}
-        config[self.guild_id]["voice_channel_id"] = selected_channel.id
-        save_config(config)
+        async with config_lock:
+            config = load_config()
+            if self.guild_id not in config:
+                config[self.guild_id] = {}
+            config[self.guild_id]["voice_channel_id"] = selected_channel.id
+            save_config(config)
         await self.update_embed(interaction, f"음성 채널이 {selected_channel.mention}(으)로 설정되었습니다.")
 
     @discord.ui.select(
@@ -70,11 +73,12 @@ class SettingsView(discord.ui.View):
     )
     async def text_channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         selected_channel = select.values[0]
-        config = load_config()
-        if self.guild_id not in config:
-            config[self.guild_id] = {}
-        config[self.guild_id]["text_channel_id"] = selected_channel.id
-        save_config(config)
+        async with config_lock:
+            config = load_config()
+            if self.guild_id not in config:
+                config[self.guild_id] = {}
+            config[self.guild_id]["text_channel_id"] = selected_channel.id
+            save_config(config)
         await self.update_embed(interaction, f"로그 채널이 {selected_channel.mention}(으)로 설정되었습니다.")
     
     async def update_embed(self, interaction: discord.Interaction, status_message: str):
@@ -100,26 +104,30 @@ class KeywordModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         keyword = self.keyword_input.value
         guild_id = str(interaction.guild.id)
-        config = load_config()
-        if guild_id not in config:
-            config[guild_id] = {"censored_keywords": []}
-        if "censored_keywords" not in config[guild_id]:
-            config[guild_id]["censored_keywords"] = []
-        keywords = config[guild_id]["censored_keywords"]
-        if self.action == 'add':
-            if keyword not in keywords:
-                keywords.append(keyword)
-                save_config(config)
-                await interaction.response.send_message(f"✅ 키워드 '{keyword}' 추가 완료.", ephemeral=True)
-            else:
-                await interaction.response.send_message(f"⚠️ 이미 등록된 키워드입니다.", ephemeral=True)
-        elif self.action == 'remove':
-            if keyword in keywords:
-                keywords.remove(keyword)
-                save_config(config)
-                await interaction.response.send_message(f"🗑️ 키워드 '{keyword}' 삭제 완료.", ephemeral=True)
-            else:
-                await interaction.response.send_message(f"❓ 등록되지 않은 키워드입니다.", ephemeral=True)
+        async with config_lock:
+            config = load_config()
+            if guild_id not in config:
+                config[guild_id] = {"censored_keywords": []}
+            if "censored_keywords" not in config[guild_id]:
+                config[guild_id]["censored_keywords"] = []
+            
+            keywords = config[guild_id]["censored_keywords"]
+            
+            if self.action == 'add':
+                if keyword not in keywords:
+                    keywords.append(keyword)
+                    save_config(config)
+                    await interaction.response.send_message(f"✅ 키워드 '{keyword}' 추가 완료.", ephemeral=True)
+                else:
+                    await interaction.response.send_message(f"⚠️ 이미 등록된 키워드입니다.", ephemeral=True)
+            
+            elif self.action == 'remove':
+                if keyword in keywords:
+                    keywords.remove(keyword)
+                    save_config(config)
+                    await interaction.response.send_message(f"🗑️ 키워드 '{keyword}' 삭제 완료.", ephemeral=True)
+                else:
+                    await interaction.response.send_message(f"❓ 등록되지 않은 키워드입니다.", ephemeral=True)
 
 class PunishmentConfigModal(discord.ui.Modal):
     """처벌 임계값과 타임아웃 시간을 설정하는 모달"""
@@ -127,29 +135,19 @@ class PunishmentConfigModal(discord.ui.Modal):
         super().__init__(title="처벌 세부 설정")
         self.punishment_type = punishment_type
 
-        self.threshold_input = discord.ui.TextInput(
-            label="경고 횟수 (처벌 임계값)",
-            placeholder="예: 3 (3번 적발 시 처벌)",
-            required=True
-        )
+        self.threshold_input = discord.ui.TextInput(label="경고 횟수 (처벌 임계값)", placeholder="예: 3 (3번 적발 시 처벌)", required=True)
         self.add_item(self.threshold_input)
 
         if self.punishment_type == "timeout":
-            self.duration_input = discord.ui.TextInput(
-                label="타임아웃 시간 (분)",
-                placeholder="예: 10 (10분간 타임아웃)",
-                required=True
-            )
+            self.duration_input = discord.ui.TextInput(label="타임아웃 시간 (분)", placeholder="예: 10 (10분간 타임아웃)", required=True)
             self.add_item(self.duration_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild.id)
-        config = load_config()
-
+        
         try:
             threshold = int(self.threshold_input.value)
-            if threshold <= 0:
-                raise ValueError
+            if threshold <= 0: raise ValueError
         except ValueError:
             await interaction.response.send_message("경고 횟수는 0보다 큰 숫자로 입력해주세요.", ephemeral=True)
             return
@@ -158,21 +156,22 @@ class PunishmentConfigModal(discord.ui.Modal):
         if self.punishment_type == "timeout":
             try:
                 duration = int(self.duration_input.value)
-                if duration <= 0:
-                    raise ValueError
+                if duration <= 0: raise ValueError
             except ValueError:
                 await interaction.response.send_message("타임아웃 시간은 0보다 큰 숫자로 입력해주세요.", ephemeral=True)
                 return
 
-        if guild_id not in config:
-            config[guild_id] = {}
-        
-        config[guild_id]['punishment'] = {
-            "type": self.punishment_type,
-            "threshold": threshold,
-            "timeout_duration_minutes": duration
-        }
-        save_config(config)
+        async with config_lock:
+            config = load_config()
+            if guild_id not in config:
+                config[guild_id] = {}
+            
+            config[guild_id]['punishment'] = {
+                "type": self.punishment_type,
+                "threshold": threshold,
+                "timeout_duration_minutes": duration
+            }
+            save_config(config)
         await interaction.response.send_message(f"✅ 처벌 설정이 저장되었습니다.", ephemeral=True)
 
 
@@ -192,14 +191,15 @@ class PunishmentSettingsView(discord.ui.View):
     )
     async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
         punishment_type = select.values[0]
-        guild_id = str(interaction.guild.id)
-        config = load_config()
-
+        
         if punishment_type == "none":
-            if guild_id not in config:
-                config[guild_id] = {}
-            config[guild_id]['punishment'] = {"type": "none", "threshold": 0, "timeout_duration_minutes": 0}
-            save_config(config)
+            async with config_lock:
+                config = load_config()
+                guild_id = str(interaction.guild.id)
+                if guild_id not in config:
+                    config[guild_id] = {}
+                config[guild_id]['punishment'] = {"type": "none", "threshold": 0, "timeout_duration_minutes": 0}
+                save_config(config)
             await interaction.response.send_message("✅ 자동 처벌을 사용하지 않도록 설정했습니다.", ephemeral=True)
         else:
             await interaction.response.send_modal(PunishmentConfigModal(punishment_type))
@@ -213,6 +213,7 @@ async def initial_setup(interaction: discord.Interaction):
     guild_id = str(guild.id)
     log_channel_name = "로그"
     existing_channel = discord.utils.get(guild.text_channels, name=log_channel_name)
+    
     if existing_channel:
         log_channel = existing_channel
         await interaction.response.send_message(f"이미 '{log_channel_name}' 채널이 있어 해당 채널을 사용합니다.", ephemeral=True)
@@ -224,11 +225,13 @@ async def initial_setup(interaction: discord.Interaction):
         except discord.Forbidden:
             await interaction.response.send_message("❌ 채널 생성 권한이 없습니다.", ephemeral=True)
             return
-    config = load_config()
-    if guild_id not in config:
-        config[guild_id] = {}
-    config[guild_id]['text_channel_id'] = log_channel.id
-    save_config(config)
+            
+    async with config_lock:
+        config = load_config()
+        if guild_id not in config:
+            config[guild_id] = {}
+        config[guild_id]['text_channel_id'] = log_channel.id
+        save_config(config)
 
 @bot.tree.command(name="설정", description="음성 채널과 로그 채널 설정을 위한 패널을 엽니다.")
 @app_commands.checks.has_permissions(administrator=True)
@@ -267,33 +270,29 @@ async def list_keywords(interaction: discord.Interaction):
 async def reset_warnings(interaction: discord.Interaction, member: discord.Member):
     guild_id = str(interaction.guild.id)
     user_id = str(member.id)
-    config = load_config()
+    
+    async with config_lock:
+        config = load_config()
+        if guild_id not in config or 'warning_counts' not in config[guild_id] or user_id not in config[guild_id]['warning_counts']:
+            await interaction.response.send_message(f"✅ **{member.display_name}** 님은 초기화할 경고 기록이 없습니다.", ephemeral=True)
+            return
 
-    if guild_id not in config or 'warning_counts' not in config[guild_id] or user_id not in config[guild_id]['warning_counts']:
-        await interaction.response.send_message(f"✅ **{member.display_name}** 님은 초기화할 경고 기록이 없습니다.", ephemeral=True)
-        return
-
-    del config[guild_id]['warning_counts'][user_id]
-    save_config(config)
+        del config[guild_id]['warning_counts'][user_id]
+        save_config(config)
 
     await interaction.response.send_message(f"✅ **{member.display_name}** 님의 경고 횟수를 성공적으로 초기화했습니다.", ephemeral=True)
 
-    log_channel_id = config[guild_id].get("text_channel_id")
+    log_channel_id = load_config()[guild_id].get("text_channel_id")
     if log_channel_id:
         log_channel = bot.get_channel(log_channel_id)
         if log_channel:
-            embed = discord.Embed(
-                title="ℹ️ 경고 초기화",
-                description=f"관리자 **{interaction.user.display_name}** 님이 **{member.mention}** 님의 경고를 초기화했습니다.",
-                color=discord.Color.light_grey()
-            )
+            embed = discord.Embed(title="ℹ️ 경고 초기화", description=f"관리자 **{interaction.user.display_name}** 님이 **{member.mention}** 님의 경고를 초기화했습니다.", color=discord.Color.light_grey())
             await log_channel.send(embed=embed)
 
 @bot.tree.command(name="처벌설정", description="검열 적발 시 자동 처벌 규칙을 설정합니다.")
 @app_commands.checks.has_permissions(administrator=True)
 async def punishment_settings(interaction: discord.Interaction):
-    guild_id = str(interaction.guild.id)
-    config = load_config().get(guild_id, {})
+    config = load_config().get(str(interaction.guild.id), {})
     punishment_config = config.get('punishment', {})
     
     ptype = punishment_config.get('type', 'none')
@@ -310,40 +309,30 @@ async def punishment_settings(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed, view=PunishmentSettingsView(), ephemeral=True)
 
-# -------------------- ✨ [수정된 기능] 음성 채널 체류 시간 랭킹 --------------------
 def format_duration(seconds):
     """초를 '시, 분, 초' 형태로 변환하는 함수 (소수점 둘째 자리까지)"""
     if seconds < 60:
-        # 60초 미만일 경우, 소수점 둘째 자리까지 표시
         return f"{seconds:.2f}초"
     
     minutes, seconds = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
     
     if hours > 0:
-        # 시간, 분은 정수로, 초는 소수점 둘째 자리까지 표시
         return f"{int(hours)}시간 {int(minutes)}분 {seconds:.2f}초"
     else:
-        # 분은 정수로, 초는 소수점 둘째 자리까지 표시
         return f"{int(minutes)}분 {seconds:.2f}초"
 
-
 @bot.tree.command(name="랭킹", description="음성 채널 체류 시간 랭킹을 표시합니다.")
-@app_commands.checks.has_permissions(administrator=True)
 async def show_ranking(interaction: discord.Interaction):
     guild_id = str(interaction.guild.id)
-    config = load_config()
-    
-    voice_time_data = config.get(guild_id, {}).get("voice_time_tracking", {})
+    voice_time_data = load_config().get(guild_id, {}).get("voice_time_tracking", {})
 
     if not voice_time_data:
         await interaction.response.send_message("아직 음성 채널 체류 시간 기록이 없습니다.", ephemeral=True)
         return
 
     sorted_users = sorted(voice_time_data.items(), key=lambda item: item[1], reverse=True)
-
     embed = discord.Embed(title="🏆 음성 채널 활동 랭킹", color=discord.Color.gold())
-    
     medals = ["🥇", "🥈", "🥉"]
     rank_description = []
     
@@ -353,22 +342,38 @@ async def show_ranking(interaction: discord.Interaction):
             user_display_name = member.display_name
         except discord.NotFound:
             user_display_name = f"알 수 없는 유저 (ID: {user_id})"
-        except Exception as e:
+        except Exception:
             user_display_name = f"유저 정보 로드 실패"
 
         formatted_time = format_duration(total_seconds)
-        if i < len(medals):
-            # 1, 2, 3위는 메달과 함께 순위 표시
-            rank_entry = f"{medals[i]} **{i+1}위.** {user_display_name} - `{formatted_time}`"
-        else:
-            # 4위부터는 순위 번호만 표시
-            rank_entry = f"**{i+1}위.** {user_display_name} - `{formatted_time}`"
-            
+        rank_entry = f"{medals[i] if i < len(medals) else f'**{i+1}위.**'} {user_display_name} - `{formatted_time}`"
         rank_description.append(rank_entry)
 
     embed.description = "\n".join(rank_description)
-    
     await interaction.response.send_message(embed=embed)
+    
+@bot.tree.command(name="명령어", description="봇의 모든 명령어 목록을 보여줍니다.")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(title="🤖 봇 명령어", description="서버 운영을 돕는 봇의 명령어 목록입니다.", color=discord.Color.blurple())
+    user_commands = (
+        "`/명령어` : 봇의 명령어 목록을 확인합니다.\n"
+        "`/랭킹` : 음성 채널 체류 시간 랭킹을 확인합니다."
+    )
+    embed.add_field(name="🙋‍♂️ 모든 사용자 명령어", value=user_commands, inline=False)
+    admin_commands = (
+        "**[ 채널 설정 ]**\n"
+        "`/초기설정` : 봇 운영에 필요한 비공개 로그 채널을 생성합니다.\n"
+        "`/설정` : 음성 채널 및 로그 채널을 설정하는 패널을 엽니다.\n\n"
+        "**[ 검열 및 처벌 ]**\n"
+        "`/검열추가` : 검열할 키워드를 추가합니다.\n"
+        "`/검열삭제` : 등록된 검열 키워드를 삭제합니다.\n"
+        "`/검열목록` : 등록된 모든 검열 키워드를 확인합니다.\n"
+        "`/처벌설정` : 검열 적발 시 자동 처벌 규칙을 설정합니다.\n"
+        "`/경고초기화 [멤버]` : 특정 사용자의 경고 횟수를 초기화합니다."
+    )
+    embed.add_field(name="🛠️ 관리자 명령어", value=admin_commands, inline=False)
+    embed.set_footer(text=f"{bot.user.name} | 궁금한 점이 있다면 서버 관리자에게 문의해주세요.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # -------------------- 봇 이벤트 핸들러 --------------------
@@ -382,20 +387,31 @@ async def on_ready():
         print(f"명령어 동기화 실패: {e}")
 
 @bot.event
-async def on_voice_state_update(member, before, after):
-    config = load_config()
-    server_id = str(member.guild.id)
-    
-    if server_id not in config:
-        config[server_id] = {}
-        
-    server_config = config[server_id]
-    target_voice_channel_id = server_config.get("voice_channel_id")
-    log_text_channel_id = server_config.get("text_channel_id")
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """전역 슬래시 명령어 에러 핸들러"""
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ 이 명령어를 실행할 권한이 없습니다.", ephemeral=True)
+    elif isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("❌ 이 명령어는 봇 소유자만 사용할 수 있습니다.", ephemeral=True)
+    else:
+        print(f"'{interaction.command.name}' 명령어 처리 중 에러 발생: {error}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message("🐛 명령어 실행 중 알 수 없는 오류가 발생했습니다.", ephemeral=True)
+        else:
+            await interaction.followup.send("🐛 명령어 실행 중 알 수 없는 오류가 발생했습니다.", ephemeral=True)
 
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    server_id = str(member.guild.id)
+    config = load_config()
+    server_config = config.get(server_id, {})
+    
+    target_voice_channel_id = server_config.get("voice_channel_id")
     if not target_voice_channel_id:
         return
 
+    log_text_channel_id = server_config.get("text_channel_id")
     log_channel = bot.get_channel(log_text_channel_id) if log_text_channel_id else None
 
     is_join = not before.channel and after.channel and after.channel.id == target_voice_channel_id
@@ -413,14 +429,19 @@ async def on_voice_state_update(member, before, after):
             duration = datetime.datetime.now() - join_time
             duration_seconds = duration.total_seconds()
             
-            user_id = str(member.id)
-            if 'voice_time_tracking' not in server_config:
-                server_config['voice_time_tracking'] = {}
-            
-            current_total_time = server_config['voice_time_tracking'].get(user_id, 0)
-            server_config['voice_time_tracking'][user_id] = current_total_time + duration_seconds
-            
-            save_config(config)
+            async with config_lock:
+                config = load_config() 
+                server_config = config.get(server_id, {})
+                
+                user_id = str(member.id)
+                if 'voice_time_tracking' not in server_config:
+                    server_config['voice_time_tracking'] = {}
+                
+                current_total_time = server_config['voice_time_tracking'].get(user_id, 0)
+                server_config['voice_time_tracking'][user_id] = current_total_time + duration_seconds
+                
+                config[server_id] = server_config
+                save_config(config)
 
             if log_channel:
                 formatted_duration = format_duration(duration_seconds)
@@ -433,13 +454,8 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
-    config = load_config()
     guild_id = str(message.guild.id)
-
-    if guild_id not in config:
-        config[guild_id] = {}
-    
-    server_config = config[guild_id]
+    server_config = load_config().get(guild_id, {})
     
     keywords = server_config.get("censored_keywords", [])
     if not keywords:
@@ -466,53 +482,59 @@ async def on_message(message: discord.Message):
                 await log_channel.send(embed=embed)
 
             punishment_config = server_config.get("punishment", {})
-            punishment_type = punishment_config.get("type", "none")
-            threshold = punishment_config.get("threshold", 0)
+            if punishment_config.get("type", "none") != "none":
+                async with config_lock:
+                    config = load_config()
+                    server_config = config.get(guild_id, {})
+                    punishment_config = server_config.get("punishment", {})
+                    threshold = punishment_config.get("threshold", 0)
 
-            if punishment_type != "none" and threshold > 0:
-                user_id = str(message.author.id)
-                
-                if 'warning_counts' not in server_config:
-                    server_config['warning_counts'] = {}
-                
-                current_warnings = server_config['warning_counts'].get(user_id, 0) + 1
-                server_config['warning_counts'][user_id] = current_warnings
-                
-                if current_warnings >= threshold:
-                    server_config['warning_counts'][user_id] = 0
-                    reason = f"검열 규칙 위반 (경고 {threshold}회 누적)"
-                    
-                    try:
-                        action_log = ""
-                        if punishment_type == "timeout":
-                            duration_minutes = punishment_config.get("timeout_duration_minutes", 10)
-                            duration = datetime.timedelta(minutes=duration_minutes)
-                            await message.author.timeout(duration, reason=reason)
-                            action_log = f"**{message.author.mention}** 님을 `{duration_minutes}`분 동안 타임아웃 처리했습니다."
+                    if threshold > 0:
+                        user_id = str(message.author.id)
+                        if 'warning_counts' not in server_config:
+                            server_config['warning_counts'] = {}
                         
-                        elif punishment_type == "kick":
-                            await message.author.kick(reason=reason)
-                            action_log = f"**{message.author.mention}** 님을 서버에서 추방했습니다."
+                        current_warnings = server_config['warning_counts'].get(user_id, 0) + 1
+                        server_config['warning_counts'][user_id] = current_warnings
+                        
+                        save_config(config)
+                        
+                        if current_warnings >= threshold:
+                            server_config['warning_counts'][user_id] = 0
+                            save_config(config)
+
+                            reason = f"검열 규칙 위반 (경고 {threshold}회 누적)"
+                            punishment_type = punishment_config.get("type")
                             
-                        elif punishment_type == "ban":
-                            await message.author.ban(reason=reason)
-                            action_log = f"**{message.author.mention}** 님을 서버에서 차단했습니다."
+                            try:
+                                action_log = ""
+                                if punishment_type == "timeout":
+                                    duration_minutes = punishment_config.get("timeout_duration_minutes", 10)
+                                    duration = datetime.timedelta(minutes=duration_minutes)
+                                    await message.author.timeout(duration, reason=reason)
+                                    action_log = f"**{message.author.mention}** 님을 `{duration_minutes}`분 동안 타임아웃 처리했습니다."
+                                
+                                elif punishment_type == "kick":
+                                    await message.author.kick(reason=reason)
+                                    action_log = f"**{message.author.mention}** 님을 서버에서 추방했습니다."
+                                    
+                                elif punishment_type == "ban":
+                                    await message.author.ban(reason=reason)
+                                    action_log = f"**{message.author.mention}** 님을 서버에서 차단했습니다."
 
-                        if log_channel and action_log:
-                            punishment_embed = discord.Embed(title="⚔️ 자동 처벌 실행", description=action_log, color=discord.Color.dark_red())
-                            punishment_embed.add_field(name="사유", value=reason)
-                            await log_channel.send(embed=punishment_embed)
+                                if log_channel and action_log:
+                                    punishment_embed = discord.Embed(title="⚔️ 자동 처벌 실행", description=action_log, color=discord.Color.dark_red())
+                                    punishment_embed.add_field(name="사유", value=reason)
+                                    await log_channel.send(embed=punishment_embed)
 
-                    except discord.Forbidden:
-                         if log_channel: await log_channel.send(f"⚠️ **권한 오류:** {message.author.mention}님에게 처벌을 실행할 수 없습니다. 봇의 역할 순위나 권한을 확인해주세요.")
-
-                else:
-                    try:
-                        await message.author.send(f"**[ {message.guild.name} ]** 서버에서 검열 키워드 사용이 감지되었습니다.\n> 현재 경고 횟수: **{current_warnings}/{threshold}**\n> 횟수 초과 시 처벌이 적용될 수 있습니다.")
-                    except discord.Forbidden:
-                        if log_channel: await log_channel.send(f"ℹ️ {message.author.mention}님에게 DM을 보낼 수 없어 경고를 전달하지 못했습니다.")
-                
-                save_config(config)
+                            except discord.Forbidden:
+                                if log_channel: await log_channel.send(f"⚠️ **권한 오류:** {message.author.mention}님에게 처벌을 실행할 수 없습니다. 봇의 역할 순위나 권한을 확인해주세요.")
+                        
+                        else:
+                            try:
+                                await message.author.send(f"**[ {message.guild.name} ]** 서버에서 검열 키워드 사용이 감지되었습니다.\n> 현재 경고 횟수: **{current_warnings}/{threshold}**\n> 횟수 초과 시 처벌이 적용될 수 있습니다.")
+                            except discord.Forbidden:
+                                if log_channel: await log_channel.send(f"ℹ️ {message.author.mention}님에게 DM을 보낼 수 없어 경고를 전달하지 못했습니다.")
             
             break
 
