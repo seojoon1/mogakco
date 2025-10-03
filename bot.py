@@ -206,7 +206,7 @@ class PunishmentSettingsView(discord.ui.View):
 
 class WelcomeMessageModal(discord.ui.Modal, title="환영 메시지 편집"):
     """환영 메시지 내용을 편집하는 모달"""
-    def __init__(self, current_message: str):
+    def __init__(self, current_message: str, current_embed_enabled: bool = False):
         super().__init__()
         self.message_input = discord.ui.TextInput(
             label="환영 메시지 (변수 사용 가능)",
@@ -217,16 +217,28 @@ class WelcomeMessageModal(discord.ui.Modal, title="환영 메시지 편집"):
         )
         self.add_item(self.message_input)
 
+        self.embed_toggle = discord.ui.TextInput(
+            label="임베드 사용 (true 또는 false)",
+            placeholder="true 또는 false 입력",
+            default="true" if current_embed_enabled else "false",
+            max_length=5,
+            required=False
+        )
+        self.add_item(self.embed_toggle)
+
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild.id)
+        embed_enabled = self.embed_toggle.value.lower() == "true"
+
         async with config_lock:
             config = load_config()
             if guild_id not in config: config[guild_id] = {}
             if 'welcome_message' not in config[guild_id]: config[guild_id]['welcome_message'] = {}
-            
+
             config[guild_id]['welcome_message']['message'] = self.message_input.value
+            config[guild_id]['welcome_message']['use_embed'] = embed_enabled
             save_config(config)
-        
+
         await interaction.response.send_message("✅ 환영 메시지가 성공적으로 저장되었습니다.", ephemeral=True)
 
 
@@ -277,8 +289,50 @@ class WelcomeSettingsView(discord.ui.View):
     @discord.ui.button(label="환영 메시지 편집", style=discord.ButtonStyle.primary, row=2)
     async def edit_message_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         config = load_config().get(self.guild_id, {})
-        current_message = config.get('welcome_message', {}).get('message', "")
-        await interaction.response.send_modal(WelcomeMessageModal(current_message))
+        welcome_config = config.get('welcome_message', {})
+        current_message = welcome_config.get('message', "")
+        current_embed_enabled = welcome_config.get('use_embed', False)
+        await interaction.response.send_modal(WelcomeMessageModal(current_message, current_embed_enabled))
+
+    @discord.ui.button(label="미리보기", style=discord.ButtonStyle.secondary, row=2)
+    async def preview_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        config = load_config().get(self.guild_id, {})
+        welcome_config = config.get('welcome_message', {})
+        message_template = welcome_config.get('message', '')
+        use_embed = welcome_config.get('use_embed', False)
+
+        if not message_template:
+            await interaction.response.send_message("⚠️ 설정된 환영 메시지가 없습니다. 먼저 메시지를 작성해주세요.", ephemeral=True)
+            return
+
+        # 미리보기용 변수 치환
+        from string import Template
+        try:
+            formatted_message = Template(message_template).safe_substitute(
+                user_mention=interaction.user.mention,
+                user_name=interaction.user.display_name,
+                user_id=interaction.user.id,
+                server_name=interaction.guild.name,
+                server_id=interaction.guild.id,
+                member_count=interaction.guild.member_count,
+                user=str(interaction.user),
+                server=str(interaction.guild)
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"⚠️ 메시지 형식 오류: {e}", ephemeral=True)
+            return
+
+        if use_embed:
+            embed = discord.Embed(
+                description=formatted_message,
+                color=discord.Color.green(),
+                timestamp=datetime.datetime.now()
+            )
+            embed.set_author(name=f"{interaction.guild.name}에 오신 것을 환영합니다!", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+            embed.set_thumbnail(url=interaction.user.display_avatar.url)
+            await interaction.response.send_message("📬 **미리보기:**", embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(f"📬 **미리보기:**\n{formatted_message}", ephemeral=True)
     
     async def update_and_respond(self, interaction: discord.Interaction, status: str):
         # 응답 후 embed를 업데이트하기 위한 헬퍼 함수
@@ -290,13 +344,15 @@ class WelcomeSettingsView(discord.ui.View):
         channel_id = welcome_config.get('channel_id')
         channel = interaction.guild.get_channel(channel_id) if channel_id else None
         message = welcome_config.get('message', '미설정')
+        use_embed = welcome_config.get('use_embed', False)
 
         embed = discord.Embed(title="👋 입장 환영 메시지 설정", description=status, color=discord.Color.green())
         embed.add_field(name="기능 상태", value="**🟢 켜짐**" if is_enabled else "⚫ 꺼짐", inline=True)
         embed.add_field(name="설정된 채널", value=channel.mention if channel else "미설정", inline=True)
+        embed.add_field(name="임베드 사용", value="✅ 사용" if use_embed else "❌ 미사용", inline=True)
         embed.add_field(name="설정된 메시지", value=f"```{message}```", inline=False)
-        embed.set_footer(text="메시지에는 변수를 사용할 수 있습니다. (예: {user_mention})")
-        
+        embed.set_footer(text="사용 가능한 변수: $user_mention, $user_name, $user_id, $server_name, $server_id, $member_count")
+
         await interaction.followup.edit_message(interaction.message.id, embed=embed, view=self)
 
 
@@ -351,12 +407,14 @@ async def welcome_settings(interaction: discord.Interaction):
     channel_id = welcome_config.get('channel_id')
     channel = interaction.guild.get_channel(channel_id) if channel_id else None
     message = welcome_config.get('message', '미설정')
+    use_embed = welcome_config.get('use_embed', False)
 
     embed = discord.Embed(title="👋 입장 환영 메시지 설정", description="아래 메뉴를 통해 환영 메시지 기능을 설정하세요.", color=discord.Color.green())
     embed.add_field(name="기능 상태", value="**🟢 켜짐**" if is_enabled else "⚫ 꺼짐", inline=True)
     embed.add_field(name="설정된 채널", value=channel.mention if channel else "미설정", inline=True)
+    embed.add_field(name="임베드 사용", value="✅ 사용" if use_embed else "❌ 미사용", inline=True)
     embed.add_field(name="설정된 메시지", value=f"```{message}```", inline=False)
-    embed.set_footer(text="메시지에는 변수를 사용할 수 있습니다. (예: {user_mention})")
+    embed.set_footer(text="사용 가능한 변수: $user_mention, $user_name, $user_id, $server_name, $server_id, $member_count")
 
     await interaction.response.send_message(embed=embed, view=WelcomeSettingsView(interaction), ephemeral=True)
 
@@ -528,6 +586,7 @@ async def on_member_join(member: discord.Member):
 
     channel_id = welcome_config.get('channel_id')
     message_template = welcome_config.get('message')
+    use_embed = welcome_config.get('use_embed', False)
 
     if not channel_id or not message_template:
         return
@@ -536,20 +595,78 @@ async def on_member_join(member: discord.Member):
     if not channel:
         return
 
-    # 변수들을 실제 값으로 치환
-    formatted_message = message_template.format(
-        user=member,
-        server=member.guild,
-        user_mention=member.mention,
-        user_name=member.display_name,
-        server_name=member.guild.name,
-        member_count=member.guild.member_count
-    )
+    # 변수 치환 (safe_substitute 사용하여 오류 방지)
+    from string import Template
+    try:
+        formatted_message = Template(message_template).safe_substitute(
+            user_mention=member.mention,
+            user_name=member.display_name,
+            user_id=member.id,
+            server_name=member.guild.name,
+            server_id=member.guild.id,
+            member_count=member.guild.member_count,
+            user=str(member),
+            server=str(member.guild)
+        )
+    except Exception as e:
+        print(f"환영 메시지 변수 치환 오류: {e}")
+        return
+
+    # 로그 채널 가져오기
+    log_channel_id = config.get('text_channel_id')
+    log_channel = member.guild.get_channel(log_channel_id) if log_channel_id else None
 
     try:
-        await channel.send(formatted_message)
+        if use_embed:
+            # 임베드 메시지 전송
+            embed = discord.Embed(
+                description=formatted_message,
+                color=discord.Color.green(),
+                timestamp=datetime.datetime.now()
+            )
+            embed.set_author(
+                name=f"{member.guild.name}에 오신 것을 환영합니다!",
+                icon_url=member.guild.icon.url if member.guild.icon else None
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            await channel.send(embed=embed)
+        else:
+            # 일반 텍스트 메시지 전송
+            await channel.send(formatted_message)
+
+        # 로그 채널에 기록
+        if log_channel:
+            log_embed = discord.Embed(
+                title="👋 환영 메시지 전송됨",
+                description=f"**멤버:** {member.mention} ({member.id})\n**채널:** {channel.mention}",
+                color=discord.Color.blue(),
+                timestamp=datetime.datetime.now()
+            )
+            log_embed.add_field(name="전송된 메시지", value=f"```{formatted_message[:1000]}```", inline=False)
+            await log_channel.send(embed=log_embed)
+
     except discord.Forbidden:
         print(f"오류: '{member.guild.name}' 서버의 '{channel.name}' 채널에 메시지를 보낼 권한이 없습니다.")
+        # 로그 채널에 오류 기록
+        if log_channel:
+            error_embed = discord.Embed(
+                title="⚠️ 환영 메시지 전송 실패",
+                description=f"**멤버:** {member.mention}\n**사유:** 권한 부족",
+                color=discord.Color.red(),
+                timestamp=datetime.datetime.now()
+            )
+            await log_channel.send(embed=error_embed)
+    except Exception as e:
+        print(f"환영 메시지 전송 중 오류: {e}")
+        # 로그 채널에 오류 기록
+        if log_channel:
+            error_embed = discord.Embed(
+                title="⚠️ 환영 메시지 전송 실패",
+                description=f"**멤버:** {member.mention}\n**사유:** {str(e)}",
+                color=discord.Color.red(),
+                timestamp=datetime.datetime.now()
+            )
+            await log_channel.send(embed=error_embed)
 
 
 @bot.event
