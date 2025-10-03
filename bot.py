@@ -211,7 +211,7 @@ class WelcomeMessageModal(discord.ui.Modal, title="환영 메시지 편집"):
         self.message_input = discord.ui.TextInput(
             label="환영 메시지 (변수 사용 가능)",
             style=discord.TextStyle.paragraph,
-            placeholder="예: {user_mention}님, {server_name}에 오신 것을 환영합니다!",
+            placeholder="예: $user_mention님, $server_name에 오신 것을 환영합니다!\n현재 멤버 수: $member_count명",
             default=current_message,
             max_length=1000
         )
@@ -225,6 +225,16 @@ class WelcomeMessageModal(discord.ui.Modal, title="환영 메시지 편집"):
             required=False
         )
         self.add_item(self.embed_toggle)
+
+        # 변수 도움말 추가
+        self.variable_help = discord.ui.TextInput(
+            label="📌 사용 가능한 변수 (입력 불필요)",
+            style=discord.TextStyle.paragraph,
+            placeholder="$user_mention: 멘션\n$user_name: 닉네임\n$user_id: ID\n$server_name: 서버명\n$server_id: 서버ID\n$member_count: 멤버수",
+            default="$user_mention: 사용자 멘션 (@사용자)\n$user_name: 사용자 닉네임\n$user_id: 사용자 ID\n$server_name: 서버 이름\n$server_id: 서버 ID\n$member_count: 현재 멤버 수",
+            required=False
+        )
+        self.add_item(self.variable_help)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild.id)
